@@ -1,21 +1,28 @@
 """
 Gemini Vision API integration for agricultural pest/disease detection.
 This is the MISSING LAYER that connects uploaded images to our diagnostic system.
+
+UPDATED: Uses the NEW google-genai SDK (not google-generativeai)
 """
 
-import google.generativeai as genai
+try:
+    from google import genai
+    from google.genai import types
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+    print("⚠️  Warning: google-genai package not installed.")
+    print("   Install with: pip install google-genai")
+
 import os
-import base64
 import json
-from typing import Tuple, List, Dict, Optional
+from typing import List, Dict
 from PIL import Image
 import io
 from dataclasses import dataclass
 
-# Configure Gemini
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+# Configure Gemini Client
+GEMINI_API_KEY = r"AIzaSyBNHd-iUnxSC4mUTLRaK_dAB8nEuyj6QNo"
 
 
 @dataclass
@@ -37,11 +44,28 @@ class GeminiVisionAnalyzer:
     """
     
     def __init__(self):
-        """Initialize Gemini model with agricultural expertise"""
-        self.model = genai.GenerativeModel('gemini-1.5-pro')
+        """Initialize Gemini client with agricultural expertise"""
+        if not GEMINI_AVAILABLE:
+            raise ImportError(
+                "google-genai package is required. "
+                "Install with: pip install google-genai"
+            )
+        
+        if not GEMINI_API_KEY:
+            raise ValueError(
+                "GEMINI_API_KEY environment variable is required.\n"
+                "Get your API key from: https://aistudio.google.com/app/apikey\n"
+                "Set it with: $env:GEMINI_API_KEY='your-key-here' (PowerShell)\n"
+                "Or: set GEMINI_API_KEY=your-key-here (CMD)"
+            )
+        
+        # Initialize the NEW SDK client
+        self.client = genai.Client(api_key=GEMINI_API_KEY)
+        self.model_id = 'models/gemini-2.5-flash'
+
         
         # System prompt that gives Gemini agricultural expertise
-        self.system_prompt = """You are an expert agricultural pathologist and entomologist with 20 years of field experience. 
+        self.system_instruction = """You are an expert agricultural pathologist and entomologist with 20 years of field experience. 
 You specialize in identifying crop pests and diseases from visual symptoms.
 
 When analyzing an image, you MUST provide a structured JSON response with these exact fields:
@@ -94,16 +118,15 @@ Be honest with confidence - if unsure, say so (confidence < 0.7).
             GeminiDetectionResult with pest identification
         """
         
-        # Load image
+        # Load and optimize image
         if image_path:
-            image = Image.open(image_path)
-        elif image_bytes:
-            image = Image.open(io.BytesIO(image_bytes))
-        else:
+            with open(image_path, 'rb') as f:
+                image_bytes = f.read()
+        elif not image_bytes:
             raise ValueError("Must provide either image_path or image_bytes")
         
-        # Optimize image size (Gemini has limits)
-        image = self._optimize_image(image)
+        # Optimize image size
+        image_bytes = self._optimize_image_bytes(image_bytes)
         
         # Create prompt with crop context
         user_prompt = f"""Analyze this {crop_type} plant image for pest or disease identification.
@@ -120,11 +143,24 @@ Pay special attention to:
 Be thorough but concise. Farmers need actionable information."""
         
         try:
-            # Call Gemini with image
-            response = self.model.generate_content(
-                [self.system_prompt, user_prompt, image],
-                generation_config=genai.GenerationConfig(
-                    temperature=0.2,  # Lower temperature for more consistent output
+            # Call Gemini with NEW SDK
+            response = self.client.models.generate_content(
+                model=self.model_id,
+                contents=[
+                    types.Content(
+                        role="user",
+                        parts=[
+                            types.Part.from_bytes(
+                                data=image_bytes,
+                                mime_type="image/jpeg"
+                            ),
+                            types.Part.from_text(text=user_prompt)
+                        ]
+                    )
+                ],
+                config=types.GenerateContentConfig(
+                    system_instruction=self.system_instruction,
+                    temperature=0.2,
                     top_p=0.8,
                 )
             )
@@ -153,23 +189,27 @@ Be thorough but concise. Farmers need actionable information."""
         
         except json.JSONDecodeError as e:
             # Fallback: Parse text response if JSON fails
-            print(f"Warning: Failed to parse JSON from Gemini. Response: {response.text[:200]}")
+            print(f"⚠️  Warning: Failed to parse JSON from Gemini.")
+            print(f"Response: {response.text[:300]}")
             return self._parse_text_response(response.text)
         
         except Exception as e:
-            print(f"Error analyzing image: {e}")
+            print(f"❌ Error analyzing image: {e}")
             raise
     
-    def _optimize_image(self, image: Image.Image) -> Image.Image:
+    def _optimize_image_bytes(self, image_bytes: bytes) -> bytes:
         """
         Optimize image for Gemini API (reduce size if needed).
         
         Args:
-            image: PIL Image object
+            image_bytes: Raw image bytes
         
         Returns:
-            Optimized PIL Image
+            Optimized image bytes
         """
+        # Load image
+        image = Image.open(io.BytesIO(image_bytes))
+        
         # Gemini works best with images under 4MB
         max_dimension = 2048
         
@@ -181,14 +221,16 @@ Be thorough but concise. Farmers need actionable information."""
         if image.mode not in ('RGB', 'L'):
             image = image.convert('RGB')
         
-        return image
+        # Convert back to bytes
+        buffer = io.BytesIO()
+        image.save(buffer, format='JPEG', quality=85)
+        return buffer.getvalue()
     
     def _parse_text_response(self, text: str) -> GeminiDetectionResult:
         """
         Fallback parser if Gemini doesn't return JSON.
         Attempts to extract information from natural language.
         """
-        # This is a simple fallback - in production, you'd want more robust parsing
         return GeminiDetectionResult(
             pest_name="Unknown - Manual Review Required",
             confidence=0.5,
@@ -212,7 +254,15 @@ Be thorough but concise. Farmers need actionable information."""
         This implements the "Predictive Risk" feature - correlating weather with pest behavior.
         """
         
-        enhanced_prompt = f"""Analyze this {crop_type} image considering these environmental conditions:
+        # Load image
+        with open(image_path, 'rb') as f:
+            image_bytes = f.read()
+        
+        # Optimize image
+        image_bytes = self._optimize_image_bytes(image_bytes)
+        
+        # Enhanced prompt with weather
+        enhanced_prompt = f"""Analyze this {crop_type} plant image considering these environmental conditions:
 
 Location: {location}
 Current Temperature: {current_weather.get('temperature', 'Unknown')}°C
@@ -225,18 +275,69 @@ These conditions affect pest behavior:
 - Low humidity (<50%) stresses plants, making them vulnerable to aphids
 
 Factor these conditions into your urgency assessment and lifecycle_stage prediction.
-"""
+
+Provide your analysis in the exact JSON format specified in the system instructions.
+
+Pay special attention to:
+1. Leaf damage patterns (holes, discoloration, wilting)
+2. Presence of insects or their signs (frass, egg masses, webbing)
+3. Disease symptoms (lesions, spots, mold growth)
+4. Overall extent of damage (for lesion_percentage)
+5. Stage of pest development (critical for treatment timing)
+
+Be thorough but concise. Farmers need actionable information."""
         
-        # Use enhanced prompt
-        original_prompt = self.system_prompt
-        self.system_prompt = original_prompt + "\n\n" + enhanced_prompt
+        try:
+            # Call Gemini with weather context
+            response = self.client.models.generate_content(
+                model=self.model_id,
+                contents=[
+                    types.Content(
+                        role="user",
+                        parts=[
+                            types.Part.from_bytes(
+                                data=image_bytes,
+                                mime_type="image/jpeg"
+                            ),
+                            types.Part.from_text(text=enhanced_prompt)
+                        ]
+                    )
+                ],
+                config=types.GenerateContentConfig(
+                    system_instruction=self.system_instruction,
+                    temperature=0.2,
+                    top_p=0.8,
+                )
+            )
+            
+            # Parse response
+            result_text = response.text
+            
+            if "```json" in result_text:
+                result_text = result_text.split("```json")[1].split("```")[0]
+            elif "```" in result_text:
+                result_text = result_text.split("```")[1].split("```")[0]
+            
+            result_json = json.loads(result_text.strip())
+            
+            return GeminiDetectionResult(
+                pest_name=result_json["pest_name"],
+                confidence=float(result_json["confidence"]),
+                lesion_percentage=float(result_json["lesion_percentage"]),
+                visual_symptoms=result_json["visual_symptoms"],
+                lifecycle_stage=result_json.get("lifecycle_stage", "Unknown"),
+                urgency_level=result_json.get("urgency_level", "Medium"),
+                reasoning=result_json["reasoning"]
+            )
         
-        result = self.analyze_image(image_path=image_path, crop_type=crop_type)
+        except json.JSONDecodeError:
+            print(f"⚠️  Warning: Failed to parse JSON.")
+            print(f"Response: {response.text[:300]}")
+            return self._parse_text_response(response.text)
         
-        # Restore original prompt
-        self.system_prompt = original_prompt
-        
-        return result
+        except Exception as e:
+            print(f"❌ Error: {e}")
+            raise
 
 
 def analyze_farmer_image(
@@ -304,15 +405,25 @@ if __name__ == "__main__":
     print("🌾 Gemini Vision Integration Demo")
     print("="*60)
     
-    # Simulate farmer uploading an image
+    # Check prerequisites
+    if not GEMINI_AVAILABLE:
+        print("❌ google-genai not installed")
+        print("   Run: pip install google-genai pillow")
+        exit(1)
+    
+    if not GEMINI_API_KEY:
+        print("❌ GEMINI_API_KEY not set")
+        print("   Get key: https://aistudio.google.com/app/apikey")
+        print("   Set: $env:GEMINI_API_KEY='your-key' (PowerShell)")
+        exit(1)
+    
+    print("✅ Prerequisites OK")
     print("\n📸 Farmer uploads leaf photo...")
     
-    # NOTE: You need a real image file for this to work
-    # For demo purposes, we'll show the expected flow
-    
+    # Try to analyze an image
     try:
         result = analyze_farmer_image(
-            image_path="test_images/fall_armyworm_damage.jpg",  # Replace with real image
+            image_path=r"C:\Users\goura\OneDrive\Desktop\temp\BuildwithGemini\backend_core\peter_griffin.jpg",
             crop_type="Maize",
             location="Nagpur",
             growth_stage="Vegetative"
@@ -331,7 +442,7 @@ if __name__ == "__main__":
             lesion_percentage=result["lesion_percentage"],
             growth_stage=GrowthStage(result["growth_stage"]),
             crop_type=result["crop_type"],
-            crop_value_per_hectare=85000.0,  # Would come from user input
+            crop_value_per_hectare=85000.0,
             location=result["location"],
             visual_symptoms=result["visual_symptoms"]
         )
@@ -340,9 +451,15 @@ if __name__ == "__main__":
         print(f"\n✅ Full diagnostic report generated: {report.diagnostic_id}")
         
     except FileNotFoundError:
-        print("\n⚠️  No test image found. Place an image at 'test_images/fall_armyworm_damage.jpg' to test.")
+        print("\n⚠️  No test image found.")
+        print("   Place an image at: test_images/fall_armyworm_damage.jpg")
         print("\n📝 Expected Flow:")
         print("   1. Farmer uploads image → Gemini analyzes")
         print("   2. Gemini returns pest name, confidence, damage %")
         print("   3. Our diagnostic system generates IPM plan")
         print("   4. Farmer receives treatment recommendations")
+    
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
