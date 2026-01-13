@@ -12,19 +12,48 @@ from logic import generate_diagnostic_report
 def format_report_as_json(report) -> str:
     """
     Convert diagnostic report to JSON format.
-    Handles dataclass serialization.
+    Handles dataclass serialization with recursion protection.
     """
-    def serialize(obj):
-        if hasattr(obj, '__dict__'):
-            return {k: serialize(v) for k, v in obj.__dict__.items()}
-        elif isinstance(obj, list):
-            return [serialize(item) for item in obj]
-        elif isinstance(obj, datetime):
+    def serialize(obj, seen=None):
+        if seen is None:
+            seen = set()
+        
+        # Prevent circular references
+        obj_id = id(obj)
+        if obj_id in seen:
+            return f"<circular reference to {type(obj).__name__}>"
+        
+        # Handle datetime
+        if isinstance(obj, datetime):
             return obj.isoformat()
-        elif hasattr(obj, 'value'):  # Enum
+        
+        # Handle Enums
+        if hasattr(obj, 'value') and hasattr(obj, 'name'):
             return obj.value
-        else:
+        
+        # Handle lists
+        if isinstance(obj, list):
+            return [serialize(item, seen) for item in obj]
+        
+        # Handle dicts
+        if isinstance(obj, dict):
+            return {k: serialize(v, seen) for k, v in obj.items()}
+        
+        # Handle dataclasses and objects with __dict__
+        if hasattr(obj, '__dict__'):
+            seen.add(obj_id)
+            try:
+                result = {k: serialize(v, seen.copy()) for k, v in obj.__dict__.items()}
+                return result
+            except:
+                return str(obj)
+        
+        # Handle primitive types
+        if isinstance(obj, (str, int, float, bool, type(None))):
             return obj
+        
+        # Fallback
+        return str(obj)
     
     return json.dumps(serialize(report), indent=2, ensure_ascii=False)
 
