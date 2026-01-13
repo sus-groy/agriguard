@@ -12,6 +12,97 @@ Each item includes:
 
 ---
 
+## 🤖 Phase 0: Gemini Vision Integration (CRITICAL - CURRENTLY MISSING!)
+
+### 0.1 Set Up Gemini API
+
+**Current State:** We're using hardcoded pest names and confidence scores.
+
+**Target State:** Process actual farmer images through Gemini Vision API.
+
+**Steps:**
+
+1. **Get Gemini API Key**
+```bash
+# Visit: https://makersuite.google.com/app/apikey
+# Create API key
+# Add to environment variables
+export GEMINI_API_KEY="your_api_key_here"
+```
+
+2. **Install Required Packages**
+```bash
+pip install google-generativeai pillow
+```
+
+3. **Use the `gemini_vision.py` Module**
+
+The `gemini_vision.py` file I created above is the bridge between images and our system.
+
+**Integration Example:**
+
+```python
+# In your API endpoint (future FastAPI route)
+from gemini_vision import analyze_farmer_image
+from models import DiagnosticInput, GrowthStage
+from logic import generate_diagnostic_report
+
+@app.post("/diagnose/upload")
+async def diagnose_from_image(
+    image: UploadFile,
+    crop_type: str,
+    location: str,
+    growth_stage: str,
+    crop_value: float
+):
+    # Save uploaded image temporarily
+    image_path = f"temp/{image.filename}"
+    with open(image_path, "wb") as f:
+        f.write(await image.read())
+    
+    # GEMINI ANALYSIS (NEW!)
+    gemini_result = analyze_farmer_image(
+        image_path=image_path,
+        crop_type=crop_type,
+        location=location,
+        growth_stage=growth_stage
+    )
+    
+    # Convert to DiagnosticInput
+    diagnostic_input = DiagnosticInput(
+        pest_name=gemini_result["pest_name"],
+        confidence=gemini_result["confidence"],
+        lesion_percentage=gemini_result["lesion_percentage"],
+        growth_stage=GrowthStage(growth_stage),
+        crop_type=crop_type,
+        crop_value_per_hectare=crop_value,
+        location=location,
+        visual_symptoms=gemini_result["visual_symptoms"]
+    )
+    
+    # Generate IPM plan (EXISTING SYSTEM)
+    report = generate_diagnostic_report(diagnostic_input)
+    
+    return report
+```
+
+**⚠️ Critical Notes:**
+- **This is the MOST important missing piece**
+- Without Gemini, farmers can't upload images - system is incomplete
+- Gemini provides: pest name, confidence, lesion %, lifecycle stage
+- Our system provides: treatment plans, economic analysis, IPM schedule
+- **Together they form the complete solution**
+
+**Testing Gemini Integration:**
+```python
+# Test with a real image
+python gemini_vision.py
+# Or use the complete flow demo
+python complete_flow_simulation.py
+```
+
+---
+
 ## 📦 Phase 1: Database Integration
 
 ### 1.1 Replace `knowledge_base.py` with PostgreSQL
